@@ -195,10 +195,20 @@ input,select{font:400 15px var(--font-body);background:var(--color-bg);color:var
       <label class="f">Source
         <select id="provider">
           <option value="none">None (outdoor only)</option>
-          <option value="ecobee">ecobee</option>
+          <option value="beestat">ecobee via Beestat</option>
+          <option value="ecobee">ecobee (developer key)</option>
           <option value="nest">Google Nest</option>
         </select>
       </label>
+
+      <div id="beestatBox" hidden>
+        <label class="f">Beestat API key <input id="beestatKey" type="password" autocomplete="off" spellcheck="false"></label>
+        <p class="help">Reads your ecobee through your Beestat account. The key stays in this browser and is never included in share links.</p>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn primary" type="button" id="beestatTest">Test connection</button>
+        </div>
+        <div class="status" id="beestatStatus"></div>
+      </div>
 
       <div id="ecobeeBox" hidden>
         <label class="f">ecobee API key <input id="ecobeeKey" autocomplete="off" spellcheck="false"></label>
@@ -254,7 +264,7 @@ const LS = {
 };
 const $ = id => document.getElementById(id);
 
-const prefs = Object.assign({ low:68, high:76, provider:"none", ecobeeKey:"", nestProject:"", nestClient:"", nestSecret:"" }, LS.get("prefs", {}));
+const prefs = Object.assign({ low:68, high:76, provider:"none", ecobeeKey:"", beestatKey:"", nestProject:"", nestClient:"", nestSecret:"" }, LS.get("prefs", {}));
 const savePrefs = () => LS.set("prefs", prefs);
 
 /* ---------- timing ---------- */
@@ -487,6 +497,67 @@ async function ecobeeRead(){
            name: th.name, src:"ecobee", at: rt.lastStatusModified ? Date.parse(rt.lastStatusModified.replace(" ","T")+"Z") : Date.now() };
 }
 
+/* ---------- Beestat (ecobee data through a Beestat account) ---------- */
+const BS = "https://api.beestat.io/";
+const bsURL = (resource, method, args) => `${BS}?api_key=${encodeURIComponent(prefs.beestatKey)}&resource=${resource}&method=${method}` + (args ? `&arguments=${encodeURIComponent(JSON.stringify(args))}` : "");
+let lastBeestatSync = 0;
+function asObj(v){ if (typeof v === "string"){ try{ return JSON.parse(v); }catch{ return null; } } return v; }
+function firstRow(data){
+  if (!data) return null;
+  const rows = Array.isArray(data) ? data : Object.values(data);
+  return rows.find(r => r && typeof r === "object") || null;
+}
+async function beestatCall(resource, method, args){
+  const j = await getJSON(bsURL(resource, method, args));
+  if (j && j.success === false) throw new Error(j.data?.error_message || j.data?.message || "Beestat refused the request");
+  return j && "data" in j ? j.data : j;
+}
+async function beestatRead(){
+  if (!prefs.beestatKey) throw Object.assign(new Error("Not connected"), {notConnected:true});
+  // Ask Beestat to pull fresh data from ecobee. This works even if the read below is blocked, and finishes in about a minute,
+  // so each reading reflects the previous cycle's sync at worst.
+  if (Date.now() - lastBeestatSync > 4*60e3){
+    lastBeestatSync = Date.now();
+    fetch(bsURL("thermostat", "sync"), {mode:"no-cors"}).catch(()=>{});
+  }
+  let t=null, rh=null, co2=null, voc=null, aq=null, name="ecobee", at=Date.now();
+  // Preferred: Beestat's copy of ecobee's own record (same fields as the ecobee API).
+  try{
+    const row = firstRow(await beestatCall("ecobee_thermostat", "read_id"));
+    const rt = asObj(row?.runtime) || {};
+    if (rt.actualTemperature != null){
+      t = rt.actualTemperature/10; rh = rt.actualHumidity ?? null;
+      co2 = rt.actualCO2 > 0 ? rt.actualCO2 : null; voc = rt.actualVOC > 0 ? rt.actualVOC : null; aq = rt.actualAQScore > 0 ? rt.actualAQScore : null;
+      if (rt.lastStatusModified) at = Date.parse(rt.lastStatusModified.replace(" ","T")+"Z") || at;
+    }
+    name = row?.name || name;
+  }catch(e){ if (e instanceof TypeError) throw e; }
+  // Fallback: Beestat's own thermostat summary.
+  if (t == null){
+    const row = firstRow(await beestatCall("thermostat", "read_id"));
+    if (row){
+      t = row.temperature != null ? +row.temperature : null;
+      rh = row.humidity != null ? +row.humidity : null;
+      name = row.name || name;
+    }
+  }
+  if (t == null) throw new Error("Beestat answered, but without a current temperature. Open beestat.io once so it syncs, then try again.");
+  return { t, rh, dp:dewPointF(t, rh), co2, voc, aqScore:aq, name, src:"Beestat", at };
+}
+async function beestatTest(){
+  setStatus("beestatStatus", "Checking…");
+  try{
+    lastBeestatSync = 0;
+    const r = await beestatRead();
+    setStatus("beestatStatus", `Connected to ${r.name}: ${r0(r.t)}°, ${r0(r.rh)}% humidity${r.co2?`, CO₂ ${r0(r.co2)} ppm`:""}.`, "ok");
+    S.indoor = r; S.lastIndoor = Date.now(); delete S.errors.indoor; render();
+  }catch(e){
+    setStatus("beestatStatus", e instanceof TypeError
+      ? "Couldn't read from Beestat. Either the key is wrong or Beestat blocks requests from other websites; tell Claude which, and it can add a small relay."
+      : "Beestat: " + e.message, "err");
+  }
+}
+
 /* ---------- Google Nest (Smart Device Management API) ---------- */
 const redirectUri = () => location.origin + location.pathname;
 function nestStart(){
@@ -546,7 +617,7 @@ async function tick(force){
     if (force || now-S.lastForecast >= FORECAST_MS) jobs.push(fetchForecast().then(h => { S.hourly=h; S.lastForecast=Date.now(); }).catch(e => S.errors.fc = e));
     if (force || now-S.lastAQ >= AQ_MS) jobs.push(fetchAQ().then(a => { S.aq=a.now; S.aqHourly=a.hourly; S.lastAQ=Date.now(); delete S.errors.aq; }).catch(e => S.errors.aq = e));
     if (prefs.provider!=="none" && (force || now-S.lastIndoor >= INDOOR_MS)){
-      const reader = prefs.provider==="ecobee" ? ecobeeRead : nestRead;
+      const reader = {ecobee:ecobeeRead, beestat:beestatRead, nest:nestRead}[prefs.provider] || ecobeeRead;
       jobs.push(reader().then(i => { S.indoor=i; S.lastIndoor=Date.now(); delete S.errors.indoor; }).catch(e => S.errors.indoor = e));
     } else if (prefs.provider==="none" && !S.demo){ S.indoor=null; }
     await Promise.all(jobs);
@@ -606,7 +677,7 @@ function render(){
   // Banner
   const notes = [];
   if (S.demo) notes.push("Showing sample data. Live readings load when this page is opened from its own web address.");
-  if (S.errors.indoor){ const e=S.errors.indoor; notes.push(e.notConnected ? `Connect your ${prefs.provider==="nest"?"Nest":"ecobee"} in Settings to compare indoor air.` : corsHint(e, prefs.provider==="nest"?"Nest":"ecobee")); }
+  if (S.errors.indoor){ const e=S.errors.indoor, who={nest:"Nest", beestat:"Beestat"}[prefs.provider]||"ecobee"; notes.push(e.notConnected ? `Connect your ${who==="Beestat"?"Beestat key":who} in Settings to compare indoor air.` : corsHint(e, who)); }
   if (prefs.provider==="none" && !S.demo) notes.push("Add your thermostat in Settings to compare against indoor conditions.");
   if (S.errors.nws && !S.demo) notes.push(S.errors.nws.status===404 ? "weather.gov only covers the US and its territories." : "weather.gov didn't respond. Retrying in 5 minutes.");
   $("banner").hidden = !notes.length; $("banner").textContent = notes.join(" ");
@@ -721,10 +792,11 @@ function renderFooter(){
 }
 
 /* ---------- settings UI ---------- */
-function syncProviderBoxes(){ $("ecobeeBox").hidden = prefs.provider!=="ecobee"; $("nestBox").hidden = prefs.provider!=="nest"; }
+function syncProviderBoxes(){ $("ecobeeBox").hidden = prefs.provider!=="ecobee"; $("nestBox").hidden = prefs.provider!=="nest"; $("beestatBox").hidden = prefs.provider!=="beestat"; }
 function openSettings(){
   $("cLow").value=prefs.low; $("cHigh").value=prefs.high; $("provider").value=prefs.provider;
-  $("ecobeeKey").value=prefs.ecobeeKey; $("nestProject").value=prefs.nestProject; $("nestClient").value=prefs.nestClient; $("nestSecret").value=prefs.nestSecret;
+  $("ecobeeKey").value=prefs.ecobeeKey; $("beestatKey").value=prefs.beestatKey||""; setStatus("beestatStatus", prefs.beestatKey ? "Key saved." : "");
+$("nestProject").value=prefs.nestProject; $("nestClient").value=prefs.nestClient; $("nestSecret").value=prefs.nestSecret;
   $("redirectUri").textContent = redirectUri();
   setStatus("ecobeeStatus", LS.get("ecobeeTok",null) ? "Connected." : "Not connected.", LS.get("ecobeeTok",null)?"ok":"");
   setStatus("nestStatus", LS.get("nestTok",null) ? "Connected." : "Not connected.", LS.get("nestTok",null)?"ok":"");
@@ -733,7 +805,7 @@ function openSettings(){
 function readSettings(){
   const lo = +$("cLow").value, hi = +$("cHigh").value;
   if (lo && hi && lo < hi){ prefs.low=lo; prefs.high=hi; }
-  prefs.provider=$("provider").value; prefs.ecobeeKey=$("ecobeeKey").value.trim();
+  prefs.provider=$("provider").value; prefs.ecobeeKey=$("ecobeeKey").value.trim(); prefs.beestatKey=$("beestatKey").value.trim();
   prefs.nestProject=$("nestProject").value.trim(); prefs.nestClient=$("nestClient").value.trim(); prefs.nestSecret=$("nestSecret").value.trim();
   savePrefs();
 }
@@ -742,7 +814,8 @@ $("refreshBtn").onclick = () => tick(true);
 $("provider").onchange = () => { prefs.provider=$("provider").value; syncProviderBoxes(); };
 $("ecobeeConnect").onclick = () => { readSettings(); ecobeeStart(); };
 $("ecobeeForget").onclick = () => { LS.del("ecobeeTok"); clearInterval(ecobeePoll); $("pinBox").hidden=true; S.indoor=null; setStatus("ecobeeStatus","Disconnected."); };
-$("nestConnect").onclick = () => { readSettings(); nestStart(); };
+$("beestatTest").onclick = () => { readSettings(); beestatTest(); };
+$("nestConnect").onclick =() => { readSettings(); nestStart(); };
 $("nestForget").onclick = () => { LS.del("nestTok"); S.indoor=null; setStatus("nestStatus","Disconnected."); };
 $("settings").addEventListener("close", () => { readSettings(); S.lastIndoor=0; if (!S.demo) tick(false); render(); });
 $("shareBtn").onclick = async () => {

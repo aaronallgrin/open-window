@@ -18,7 +18,7 @@ A stoplight for whether to open the windows. It compares indoor readings from an
 | weather.gov latest station observation | Outdoor temperature, humidity, dew point, wind, conditions | Every 5 min |
 | weather.gov hourly forecast | 12-hour outlook, jacket and umbrella hints | Every 30 min |
 | Open-Meteo air quality (CAMS) | Outdoor US AQI, PM2.5, ozone | Every 15 min |
-| ecobee or Nest | Indoor temperature, humidity, CO₂/VOC (ecobee air sensor models) | Every 5 min |
+| Beestat, ecobee or Nest | Indoor temperature, humidity, CO₂/VOC (ecobee air sensor models) | Every 5 min |
 
 Polling pauses while the tab is hidden.
 
@@ -26,7 +26,8 @@ Polling pauses while the tab is hidden.
 
 Open Settings (gear icon):
 
-- **ecobee:** paste an existing ecobee API key (ecobee isn't issuing new developer keys), tap Connect, then enter the PIN at ecobee.com → My Apps → Add Application.
+- **ecobee via Beestat:** link your ecobee at beestat.io, request a Beestat API key, paste it in, and tap Test connection. The app asks Beestat to sync before each reading.
+- **ecobee (developer key):** paste an existing ecobee API key (ecobee isn't issuing new developer keys), tap Connect, then enter the PIN at ecobee.com → My Apps → Add Application.
 - **Nest:** needs a Google Device Access project and an OAuth web client whose redirect URI is the live app address above.
 - **Share:** "Copy share link" sends the setup (not your login) to someone else; they authorize with their own account.
 
