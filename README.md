@@ -26,10 +26,12 @@ Polling pauses while the tab is hidden.
 
 Open Settings (gear icon):
 
-- **ecobee via Beestat:** link your ecobee at beestat.io and request a Beestat API key. Beestat only answers its own website, so deploy `relay/beestat-worker.js` as a free Cloudflare Worker (optionally with the key as a `BEESTAT_KEY` secret), then paste the Worker address, and the key if the relay does not hold it, into Settings and tap Test connection.
+- **ecobee via Beestat:** link your ecobee at beestat.io and request a Beestat API key. Beestat only answers its own website, so deploy `relay/beestat-worker.js` as a free Cloudflare Worker, then paste the Worker address, and the key if the relay does not hold it, into Settings and tap Test connection. Two optional Worker secrets:
+  - `BEESTAT_KEY`: the relay holds your key, so no browser needs it.
+  - `RELAY_TOKEN`: any long random string. The relay then only answers at `https://<worker>/<RELAY_TOKEN>`, so the bare Worker address is useless to anyone who finds it. Paste the full address, token included, into Settings. Recommended whenever `BEESTAT_KEY` is set.
 - **ecobee (developer key):** paste an existing ecobee API key (ecobee isn't issuing new developer keys), tap Connect, then enter the PIN at ecobee.com → My Apps → Add Application.
 - **Nest:** needs a Google Device Access project and an OAuth web client whose redirect URI is the live app address above.
-- **Share:** "Copy share link" sends the setup (not your login) to someone else; they authorize with their own account.
+- **Share:** "Copy share link" sends the setup (not your login, keys or Nest client secret) to someone else; they authorize with their own account. A link that would change an existing thermostat setup asks before applying.
 
 Keys and tokens are stored only in each person's browser. Nothing secret is in this repo.
 

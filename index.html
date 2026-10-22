@@ -211,8 +211,8 @@ input,select{font:400 15px var(--font-body);background:var(--color-bg);color:var
 
       <div id="beestatBox" hidden>
         <label class="f">Beestat API key <input id="beestatKey" type="password" autocomplete="off" spellcheck="false"></label>
-        <label class="f" style="margin-top:8px">Relay address <input id="beestatRelay" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://open-window-relay.yourname.workers.dev"></label>
-        <p class="help">Beestat only answers its own website, so readings go through your relay. If the relay holds the key, you can leave the key blank. The key stays in this browser and is never included in share links; the relay address is.</p>
+        <label class="f" style="margin-top:8px">Relay address <input id="beestatRelay" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://open-window-relay.yourname.workers.dev/your-token"></label>
+        <p class="help">Beestat only answers its own website, so readings go through your relay. If the relay holds the key, you can leave the key blank. The key stays in this browser and is never included in share links; the relay address is, including any token at the end of it.</p>
         <div class="actions" style="margin-top:8px">
           <button class="btn primary" type="button" id="beestatTest">Test connection</button>
         </div>
@@ -250,7 +250,7 @@ input,select{font:400 15px var(--font-body);background:var(--color-bg);color:var
 
     <fieldset>
       <legend>Share with someone</legend>
-      <p class="help">Copies a link that carries this thermostat setup (not your login). They connect with their own ecobee or Google sign-in.</p>
+      <p class="help">Copies a link that carries this thermostat setup (not your login, keys or client secret). They connect with their own ecobee or Google sign-in; for Nest, they enter the client secret themselves.</p>
       <div class="actions"><button class="btn" type="button" id="shareBtn">Copy share link</button></div>
       <div class="copybox" id="shareOut" hidden></div>
     </fieldset>
@@ -281,7 +281,7 @@ const INDOOR_MS = 5*60e3, OUTDOOR_MS = 5*60e3, AQ_MS = 15*60e3, FORECAST_MS = 30
 
 /* ---------- state ---------- */
 const S = { loc:null, indoor:null, outdoor:null, aq:null, hourly:null, aqHourly:null, meta:null,
-            lastIndoor:0, lastOutdoor:0, lastAQ:0, lastForecast:0, errors:{}, demo:false };
+            lastIndoor:0, lastOutdoor:0, lastAQ:0, lastForecast:0, lastLocTry:0, errors:{}, demo:false };
 
 /* ---------- math ---------- */
 const c2f = c => c*9/5+32;
@@ -360,8 +360,19 @@ function evaluate(ind, out, p){
 }
 
 /* ---------- network helpers ---------- */
+const FETCH_TIMEOUT_MS = 15e3;
+function timeoutSignal(ms){
+  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+  const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal;
+}
 async function getJSON(url, opts={}){
-  const res = await fetch(url, opts);
+  // Every request gets a timeout so one stalled call can't hold the refresh loop forever.
+  let res;
+  try{ res = await fetch(url, Object.assign({}, opts, {signal: opts.signal || timeoutSignal(FETCH_TIMEOUT_MS)})); }
+  catch(e){
+    if (e && (e.name==="TimeoutError" || e.name==="AbortError")) throw Object.assign(new Error("Request timed out"), {timeout:true});
+    throw e;
+  }
   const text = await res.text();
   let body = null; try{ body = JSON.parse(text); }catch{}
   if (!res.ok){ const msg = body && (body.detail || body.error_description || body.status?.message || body.error?.message || body.data?.error_message || (typeof body.error==="string" && body.error));
@@ -513,7 +524,7 @@ const BS = "https://api.beestat.io/";
 const bsURL = (resource, method, args) => {
   let relay = (prefs.beestatRelay || "").trim().replace(/\/+$/, "");
   if (relay && !/^https?:\/\//i.test(relay)) relay = "https://" + relay;   // a bare host would otherwise be read as a path on this site
-  if (relay){ try{ relay = new URL(relay).origin; }catch{} }              // drop any path or query that came along with a paste
+  if (relay){ try{ const r = new URL(relay); relay = r.origin + r.pathname.replace(/\/+$/, ""); }catch{} }   // keep the path (it can hold the relay token); drop any query that came along with a paste
   const base = relay || BS.replace(/\/$/, "");
   return `${base}/?resource=${resource}&method=${method}` + (prefs.beestatKey ? `&api_key=${encodeURIComponent(prefs.beestatKey)}` : "") + (args ? `&arguments=${encodeURIComponent(JSON.stringify(args))}` : "");
 };
@@ -535,7 +546,7 @@ async function beestatRead(){
   let data;
   try{ data = await beestatCall("thermostat", "read_id"); }
   catch(e){
-    if (e instanceof TypeError) throw e;
+    if (e instanceof TypeError || e.timeout || e.status===401 || e.status===403 || e.status===404) throw e;
     await new Promise(r => setTimeout(r, 3000));          // one retry, in case Beestat was mid-sync
     data = await beestatCall("thermostat", "read_id");
   }
@@ -561,6 +572,8 @@ async function beestatTest(){
   }catch(e){
     setStatus("beestatStatus", e instanceof TypeError
       ? (prefs.beestatRelay ? "Couldn't reach the relay. Check the address and that the Worker is deployed." : "Beestat blocks direct requests from this page. Add your relay address above.")
+      : (e.status===404 && prefs.beestatRelay) ? "The relay didn't recognize this address. If it has a RELAY_TOKEN, the token goes at the end of the address."
+      : e.timeout ? "Beestat took too long to answer. Try again in a minute."
       : "Beestat: " + e.message, "err");
   }
 }
@@ -615,17 +628,21 @@ async function tick(force){
   const now = Date.now();
   try{
     if (!S.loc){
+      if (!force && now-S.lastLocTry < OUTDOOR_MS) return;     // don't re-run location lookups every minute
+      S.lastLocTry = now;
       S.loc = await locate();
-      if (!S.loc) throw Object.assign(new Error("Couldn't determine your location."), {fatal:true});
-      LS.set("loc", S.loc);
+      if (!S.loc) throw Object.assign(new Error("Couldn't determine your location."), {loc:true});
+      LS.set("loc", S.loc); delete S.errors.loc;
     }
+    // The first real answer from any source ends sample mode, so live data never mixes with sample data.
+    const live = fn => (...a) => { if (S.demo) leaveDemo(); return fn(...a); };
     const jobs = [];
-    if (force || now-S.lastOutdoor >= OUTDOOR_MS) jobs.push(fetchOutdoor().then(o => { if (o){ S.outdoor=o; } S.lastOutdoor=Date.now(); delete S.errors.nws; }).catch(e => S.errors.nws = e));
-    if (force || now-S.lastForecast >= FORECAST_MS) jobs.push(fetchForecast().then(h => { S.hourly=h; S.lastForecast=Date.now(); }).catch(e => S.errors.fc = e));
-    if (force || now-S.lastAQ >= AQ_MS) jobs.push(fetchAQ().then(a => { S.aq=a.now; S.aqHourly=a.hourly; S.lastAQ=Date.now(); delete S.errors.aq; }).catch(e => S.errors.aq = e));
+    if (force || now-S.lastOutdoor >= OUTDOOR_MS) jobs.push(fetchOutdoor().then(live(o => { if (o){ S.outdoor=o; } S.lastOutdoor=Date.now(); delete S.errors.nws; })).catch(e => S.errors.nws = e));
+    if (force || now-S.lastForecast >= FORECAST_MS) jobs.push(fetchForecast().then(live(h => { S.hourly=h; S.lastForecast=Date.now(); delete S.errors.fc; })).catch(e => S.errors.fc = e));
+    if (force || now-S.lastAQ >= AQ_MS) jobs.push(fetchAQ().then(live(a => { S.aq=a.now; S.aqHourly=a.hourly; S.lastAQ=Date.now(); delete S.errors.aq; })).catch(e => S.errors.aq = e));
     if (prefs.provider!=="none" && (force || now-S.lastIndoor >= INDOOR_MS)){
       const reader = {ecobee:ecobeeRead, beestat:beestatRead, nest:nestRead}[prefs.provider] || ecobeeRead;
-      jobs.push(reader().then(i => { S.indoor=i; S.lastIndoor=Date.now(); delete S.errors.indoor; }).catch(e => S.errors.indoor = e));
+      jobs.push(reader().then(live(i => { S.indoor=i; S.lastIndoor=Date.now(); delete S.errors.indoor; })).catch(e => S.errors.indoor = e));
     } else if (prefs.provider==="none" && !S.demo){ S.indoor=null; }
     await Promise.all(jobs);
     // Fill gaps in the latest observation from the current forecast hour
@@ -633,17 +650,25 @@ async function tick(force){
       const h = S.hourly[0]; S.outdoor = { t:h.t, dp:h.dp ?? dewPointF(h.t,h.rh), rh:h.rh ?? rhFrom(h.t,h.dp), wind:h.wind, wx:h.wx, at:h.start, fromForecast:true };
     }
     if (S.outdoor && S.hourly) S.outdoor.pop = S.hourly[0]?.pop;
-    if (!S.outdoor && !S.demo && S.errors.nws) loadDemo();
+    if (!S.outdoor && !S.demo && S.errors.nws && CAN_DEMO) loadDemo();
   }catch(e){
-    if (!S.demo) loadDemo(e.message);
+    if (e.loc) S.errors.loc = e;
+    if (!S.demo && CAN_DEMO) loadDemo();
   }finally{ busy = false; render(); }
 }
 
-/* ---------- sample data when the APIs can't be reached (e.g. inside a preview) ---------- */
+/* ---------- sample data, only off the live site (e.g. inside a preview where the APIs are blocked) ---------- */
+// On the real site a failed fetch shows "no data" and retries; it never falls back to made-up readings.
+const CAN_DEMO = !/\.github\.io$/i.test(location.hostname);
+function leaveDemo(){
+  S.demo = false;
+  S.indoor = S.outdoor = S.aq = S.hourly = S.aqHourly = null;
+  S.lastOutdoor = S.lastForecast = S.lastAQ = S.lastIndoor = 0;   // refetch whatever the sample was standing in for
+}
 function loadDemo(){
   S.demo = true;
+  S.lastOutdoor = S.lastForecast = S.lastAQ = S.lastIndoor = 0;
   const now = Date.now(), h0 = Math.ceil(now/3600e3)*3600e3;
-  S.loc = S.loc || {label:"Sample location", approx:true};
   S.indoor = { t:74.5, rh:52, dp:dewPointF(74.5,52), co2:1120, voc:410, name:"Sample thermostat", src:"sample", at:now };
   S.outdoor = { t:63, rh:58, dp:dewPointF(63,58), wind:7, wx:"Mostly Clear", at:now, pop:5 };
   S.aq = { aqi:38, pm25:7.1, o3:52 };
@@ -666,11 +691,11 @@ function render(){
   ["R","Y","G"].forEach(k => $("lamp"+k).classList.remove("on"));
   const h = $("verdictText");
   h.className = "";
-  if (ev.level==null){ $("verdictLabel").textContent="Checking conditions"; h.textContent = S.errors.nws ? "No outdoor data yet" : "One moment…"; }
+  if (ev.level==null){ $("verdictLabel").textContent="Checking conditions"; h.textContent = S.errors.loc ? "Location unavailable" : S.errors.nws ? "No outdoor data yet" : "One moment…"; }
   else {
     $("lamp"+["G","Y","R"][ev.level]).classList.add("on");
     h.textContent = HEAD[ev.level]; h.classList.add(LV[ev.level]);
-    $("verdictLabel").textContent = S.indoor ? "Indoor vs. outdoor" : "Outdoor only";
+    $("verdictLabel").textContent = S.demo ? "Sample data" : S.indoor ? "Indoor vs. outdoor" : "Outdoor only";
     $("lightImg").setAttribute("aria-label", "Stoplight: "+LV[ev.level]);
   }
   $("reasons").innerHTML = "";
@@ -686,7 +711,8 @@ function render(){
   if (S.demo) notes.push("Showing sample data. Live readings load when this page is opened from its own web address.");
   if (S.errors.indoor){ const e=S.errors.indoor, who={nest:"Nest", beestat:"Beestat"}[prefs.provider]||"ecobee"; notes.push(e.notConnected ? `Connect your ${who==="Beestat"?"Beestat key":who} in Settings to compare indoor air.` : corsHint(e, who)); }
   if (prefs.provider==="none" && !S.demo) notes.push("Add your thermostat in Settings to compare against indoor conditions.");
-  if (S.errors.nws && !S.demo) notes.push(S.errors.nws.status===404 ? "weather.gov only covers the US and its territories." : "weather.gov didn't respond. Retrying in 5 minutes.");
+  if (S.errors.nws && !S.demo) notes.push(S.errors.nws.status===404 ? "weather.gov only covers the US and its territories." : "weather.gov didn't respond. Retrying shortly.");
+  if (S.errors.loc && !S.demo) notes.push("Couldn't determine your location. Allow location access or check your connection; it will try again shortly.");
   $("banner").hidden = !notes.length; $("banner").textContent = notes.join(" ");
 
   // Comparison
@@ -787,7 +813,7 @@ function renderOutlook(){
 function renderFooter(){
   const L = S.loc;
   const place = S.meta?.place || L?.label || "your area";
-  $("locLine").textContent = L ? `${place}${L.approx ? " (approximate)" : ""}` : "Finding your location…";
+  $("locLine").textContent = L ? `${place}${L.approx ? " (approximate)" : ""}` : S.demo ? "Sample location" : S.errors.loc ? "Location unavailable" : "Finding your location…";
   const parts = [];
   if (S.outdoor?.station) parts.push(`Outdoor: NWS station ${S.outdoor.station.id}, observed ${ago(S.outdoor.at)}`);
   else if (S.outdoor?.fromForecast) parts.push("Outdoor: NWS hourly forecast");
@@ -824,13 +850,13 @@ $("ecobeeForget").onclick = () => { LS.del("ecobeeTok"); clearInterval(ecobeePol
 $("beestatTest").onclick = () => { readSettings(); beestatTest(); };
 $("nestConnect").onclick =() => { readSettings(); nestStart(); };
 $("nestForget").onclick = () => { LS.del("nestTok"); S.indoor=null; setStatus("nestStatus","Disconnected."); };
-$("settings").addEventListener("close", () => { readSettings(); S.lastIndoor=0; if (!S.demo) tick(false); render(); });
+$("settings").addEventListener("close", () => { readSettings(); S.lastIndoor=0; tick(false); render(); });
 $("shareBtn").onclick = async () => {
   readSettings();
   const cfg = {low:prefs.low, high:prefs.high, provider:prefs.provider};
   if (prefs.provider==="ecobee") cfg.ecobeeKey = prefs.ecobeeKey;
   if (prefs.provider==="beestat" && prefs.beestatRelay) cfg.beestatRelay = prefs.beestatRelay;
-  if (prefs.provider==="nest") Object.assign(cfg, {nestProject:prefs.nestProject, nestClient:prefs.nestClient, nestSecret:prefs.nestSecret});
+  if (prefs.provider==="nest") Object.assign(cfg, {nestProject:prefs.nestProject, nestClient:prefs.nestClient});   // never the client secret
   const link = `${redirectUri()}#setup=${btoa(unescape(encodeURIComponent(JSON.stringify(cfg))))}`;
   const box = $("shareOut"); box.textContent = link; box.hidden = false;
   try{ await navigator.clipboard.writeText(link); $("shareBtn").textContent = "Copied"; setTimeout(()=>$("shareBtn").textContent="Copy share link", 2000); }
@@ -860,10 +886,37 @@ async function loadVersion(){
 }
 
 /* ---------- boot ---------- */
+// A share link is untrusted input: anyone can craft one. Only these settings can come from a link,
+// and a link that would change an existing connection (where keys and readings are sent) has to be confirmed.
+const SHARE_FIELDS = {
+  low:          v => Number.isFinite(+v) && +v>=55 && +v<=80 ? Math.round(+v) : undefined,
+  high:         v => Number.isFinite(+v) && +v>=60 && +v<=85 ? Math.round(+v) : undefined,
+  provider:     v => ["none","beestat","ecobee","nest"].includes(v) ? v : undefined,
+  beestatRelay: v => { try{ const u = new URL(String(v)); return u.protocol==="https:" ? u.origin + u.pathname.replace(/\/+$/, "") : undefined; }catch{ return undefined; } },
+  ecobeeKey:    v => /^[A-Za-z0-9]{1,64}$/.test(v) ? v : undefined,
+  nestProject:  v => /^[\w-]{1,100}$/.test(v) ? v : undefined,
+  nestClient:   v => /^[\w.-]{1,200}$/.test(v) ? v : undefined,
+};
+const CONNECTION_FIELDS = ["provider","beestatRelay","ecobeeKey","nestProject","nestClient"];
 function importShared(){
   const m = location.hash.match(/^#setup=(.+)$/); if (!m) return false;
-  try{ Object.assign(prefs, JSON.parse(decodeURIComponent(escape(atob(m[1]))))); savePrefs(); }catch{}
   history.replaceState(null, "", location.pathname + location.search);
+  let raw; try{ raw = JSON.parse(decodeURIComponent(escape(atob(m[1])))); }catch{ return false; }
+  if (!raw || typeof raw !== "object") return false;
+  const next = {};
+  for (const [k, clean] of Object.entries(SHARE_FIELDS)){
+    if (!(k in raw)) continue;
+    const v = clean(raw[k]); if (v !== undefined) next[k] = v;
+  }
+  if (next.low!=null && next.high!=null && next.low>=next.high){ delete next.low; delete next.high; }
+  const hasConnection = prefs.provider!=="none" || prefs.beestatKey || LS.get("ecobeeTok",null) || LS.get("nestTok",null);
+  const changes = CONNECTION_FIELDS.filter(k => k in next && next[k] !== (prefs[k] || (k==="provider" ? "none" : "")));
+  if (hasConnection && changes.length){
+    const where = next.beestatRelay ? `\n\nBeestat readings${prefs.beestatKey ? " and your Beestat key" : ""} would go through:\n${new URL(next.beestatRelay).host}` : "";
+    const ok = confirm(`This link changes your thermostat setup (${changes.join(", ")}).${where}\n\nOnly accept if it came from someone you trust.`);
+    if (!ok) CONNECTION_FIELDS.forEach(k => delete next[k]);
+  }
+  Object.assign(prefs, next); savePrefs();
   return true;
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(false); });
