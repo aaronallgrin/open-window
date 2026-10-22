@@ -503,7 +503,10 @@ async function ecobeeRead(){
 /* ---------- Beestat (ecobee data through a Beestat account) ---------- */
 const BS = "https://api.beestat.io/";
 const bsURL = (resource, method, args) => {
-  const base = (prefs.beestatRelay || "").trim().replace(/\/+$/, "") || BS.replace(/\/$/, "");
+  let relay = (prefs.beestatRelay || "").trim().replace(/\/+$/, "");
+  if (relay && !/^https?:\/\//i.test(relay)) relay = "https://" + relay;   // a bare host would otherwise be read as a path on this site
+  if (relay){ try{ relay = new URL(relay).origin; }catch{} }              // drop any path or query that came along with a paste
+  const base = relay || BS.replace(/\/$/, "");
   return `${base}/?resource=${resource}&method=${method}` + (prefs.beestatKey ? `&api_key=${encodeURIComponent(prefs.beestatKey)}` : "") + (args ? `&arguments=${encodeURIComponent(JSON.stringify(args))}` : "");
 };
 let lastBeestatSync = 0;
