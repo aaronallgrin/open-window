@@ -26,7 +26,7 @@ Polling pauses while the tab is hidden.
 
 Open Settings (gear icon):
 
-- **ecobee via Beestat:** link your ecobee at beestat.io, request a Beestat API key, paste it in, and tap Test connection. The app asks Beestat to sync before each reading.
+- **ecobee via Beestat:** link your ecobee at beestat.io and request a Beestat API key. Beestat only answers its own website, so deploy `relay/beestat-worker.js` as a free Cloudflare Worker (optionally with the key as a `BEESTAT_KEY` secret), then paste the Worker address, and the key if the relay does not hold it, into Settings and tap Test connection.
 - **ecobee (developer key):** paste an existing ecobee API key (ecobee isn't issuing new developer keys), tap Connect, then enter the PIN at ecobee.com → My Apps → Add Application.
 - **Nest:** needs a Google Device Access project and an OAuth web client whose redirect URI is the live app address above.
 - **Share:** "Copy share link" sends the setup (not your login) to someone else; they authorize with their own account.

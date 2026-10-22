@@ -203,7 +203,8 @@ input,select{font:400 15px var(--font-body);background:var(--color-bg);color:var
 
       <div id="beestatBox" hidden>
         <label class="f">Beestat API key <input id="beestatKey" type="password" autocomplete="off" spellcheck="false"></label>
-        <p class="help">Reads your ecobee through your Beestat account. The key stays in this browser and is never included in share links.</p>
+        <label class="f" style="margin-top:8px">Relay address <input id="beestatRelay" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://open-window-relay.yourname.workers.dev"></label>
+        <p class="help">Beestat only answers its own website, so readings go through your relay. If the relay holds the key, you can leave the key blank. The key stays in this browser and is never included in share links; the relay address is.</p>
         <div class="actions" style="margin-top:8px">
           <button class="btn primary" type="button" id="beestatTest">Test connection</button>
         </div>
@@ -499,7 +500,10 @@ async function ecobeeRead(){
 
 /* ---------- Beestat (ecobee data through a Beestat account) ---------- */
 const BS = "https://api.beestat.io/";
-const bsURL = (resource, method, args) => `${BS}?api_key=${encodeURIComponent(prefs.beestatKey)}&resource=${resource}&method=${method}` + (args ? `&arguments=${encodeURIComponent(JSON.stringify(args))}` : "");
+const bsURL = (resource, method, args) => {
+  const base = (prefs.beestatRelay || "").trim().replace(/\/+$/, "") || BS.replace(/\/$/, "");
+  return `${base}/?resource=${resource}&method=${method}` + (prefs.beestatKey ? `&api_key=${encodeURIComponent(prefs.beestatKey)}` : "") + (args ? `&arguments=${encodeURIComponent(JSON.stringify(args))}` : "");
+};
 let lastBeestatSync = 0;
 function asObj(v){ if (typeof v === "string"){ try{ return JSON.parse(v); }catch{ return null; } } return v; }
 function firstRow(data){
@@ -513,7 +517,7 @@ async function beestatCall(resource, method, args){
   return j && "data" in j ? j.data : j;
 }
 async function beestatRead(){
-  if (!prefs.beestatKey) throw Object.assign(new Error("Not connected"), {notConnected:true});
+  if (!prefs.beestatKey && !prefs.beestatRelay) throw Object.assign(new Error("Not connected"), {notConnected:true});
   // Ask Beestat to pull fresh data from ecobee. This works even if the read below is blocked, and finishes in about a minute,
   // so each reading reflects the previous cycle's sync at worst.
   if (Date.now() - lastBeestatSync > 4*60e3){
@@ -553,7 +557,7 @@ async function beestatTest(){
     S.indoor = r; S.lastIndoor = Date.now(); delete S.errors.indoor; render();
   }catch(e){
     setStatus("beestatStatus", e instanceof TypeError
-      ? "Couldn't read from Beestat. Either the key is wrong or Beestat blocks requests from other websites; tell Claude which, and it can add a small relay."
+      ? (prefs.beestatRelay ? "Couldn't reach the relay. Check the address and that the Worker is deployed." : "Beestat blocks direct requests from this page. Add your relay address above.")
       : "Beestat: " + e.message, "err");
   }
 }
@@ -795,7 +799,7 @@ function renderFooter(){
 function syncProviderBoxes(){ $("ecobeeBox").hidden = prefs.provider!=="ecobee"; $("nestBox").hidden = prefs.provider!=="nest"; $("beestatBox").hidden = prefs.provider!=="beestat"; }
 function openSettings(){
   $("cLow").value=prefs.low; $("cHigh").value=prefs.high; $("provider").value=prefs.provider;
-  $("ecobeeKey").value=prefs.ecobeeKey; $("beestatKey").value=prefs.beestatKey||""; setStatus("beestatStatus", prefs.beestatKey ? "Key saved." : "");
+  $("ecobeeKey").value=prefs.ecobeeKey; $("beestatKey").value=prefs.beestatKey||""; $("beestatRelay").value=prefs.beestatRelay||""; setStatus("beestatStatus", prefs.beestatKey ? "Key saved." : "");
 $("nestProject").value=prefs.nestProject; $("nestClient").value=prefs.nestClient; $("nestSecret").value=prefs.nestSecret;
   $("redirectUri").textContent = redirectUri();
   setStatus("ecobeeStatus", LS.get("ecobeeTok",null) ? "Connected." : "Not connected.", LS.get("ecobeeTok",null)?"ok":"");
@@ -805,7 +809,7 @@ $("nestProject").value=prefs.nestProject; $("nestClient").value=prefs.nestClient
 function readSettings(){
   const lo = +$("cLow").value, hi = +$("cHigh").value;
   if (lo && hi && lo < hi){ prefs.low=lo; prefs.high=hi; }
-  prefs.provider=$("provider").value; prefs.ecobeeKey=$("ecobeeKey").value.trim(); prefs.beestatKey=$("beestatKey").value.trim();
+  prefs.provider=$("provider").value; prefs.ecobeeKey=$("ecobeeKey").value.trim(); prefs.beestatKey=$("beestatKey").value.trim(); prefs.beestatRelay=$("beestatRelay").value.trim();
   prefs.nestProject=$("nestProject").value.trim(); prefs.nestClient=$("nestClient").value.trim(); prefs.nestSecret=$("nestSecret").value.trim();
   savePrefs();
 }
@@ -822,6 +826,7 @@ $("shareBtn").onclick = async () => {
   readSettings();
   const cfg = {low:prefs.low, high:prefs.high, provider:prefs.provider};
   if (prefs.provider==="ecobee") cfg.ecobeeKey = prefs.ecobeeKey;
+  if (prefs.provider==="beestat" && prefs.beestatRelay) cfg.beestatRelay = prefs.beestatRelay;
   if (prefs.provider==="nest") Object.assign(cfg, {nestProject:prefs.nestProject, nestClient:prefs.nestClient, nestSecret:prefs.nestSecret});
   const link = `${redirectUri()}#setup=${btoa(unescape(encodeURIComponent(JSON.stringify(cfg))))}`;
   const box = $("shareOut"); box.textContent = link; box.hidden = false;
@@ -845,7 +850,8 @@ setInterval(() => { if (!document.hidden) renderFooter(); }, 30e3);
   try{ await nestFinishIfReturning(); }catch(e){ S.errors.indoor = e; }
   render();
   await tick(true);
-  if (shared && prefs.provider!=="none" && !LS.get(prefs.provider==="nest"?"nestTok":"ecobeeTok", null)) openSettings();
+  const hasAuth = {nest:!!LS.get("nestTok",null), ecobee:!!LS.get("ecobeeTok",null), beestat:!!(prefs.beestatKey||prefs.beestatRelay)}[prefs.provider];
+  if (shared && prefs.provider!=="none" && !hasAuth) openSettings();
 })();
 })();
 </script>
