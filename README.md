@@ -1,0 +1,37 @@
+# Open Window
+
+A stoplight for whether to open the windows. It compares indoor readings from an ecobee or Google Nest thermostat with outdoor conditions from weather.gov and outdoor air quality from Open-Meteo, then shows green, yellow or red with the reasons. It also says when to bring a jacket or an umbrella and shows the next good window over the coming 12 hours.
+
+**Live app:** https://aaronallgrin.github.io/open-window/
+
+## How it decides
+
+- **Red:** rain or storms, outdoor AQI over 100, outdoor dew point 8°F+ above indoor (or muggy and higher), very windy, or temperatures far outside your comfort range.
+- **Yellow:** moderate AQI, slightly more humid air outside, breezy, or temperatures that pull the house out of range.
+- **Green:** everything else. Cooler or drier air that helps, and high indoor CO₂ or VOCs, count in favor of opening.
+
+## Data and refresh
+
+| Source | What | How often |
+| --- | --- | --- |
+| Device location, or IP-based location as a silent fallback | Where you are | Once per visit |
+| weather.gov latest station observation | Outdoor temperature, humidity, dew point, wind, conditions | Every 5 min |
+| weather.gov hourly forecast | 12-hour outlook, jacket and umbrella hints | Every 30 min |
+| Open-Meteo air quality (CAMS) | Outdoor US AQI, PM2.5, ozone | Every 15 min |
+| ecobee or Nest | Indoor temperature, humidity, CO₂/VOC (ecobee air sensor models) | Every 5 min |
+
+Polling pauses while the tab is hidden.
+
+## Setup
+
+Open Settings (gear icon):
+
+- **ecobee:** paste an existing ecobee API key (ecobee isn't issuing new developer keys), tap Connect, then enter the PIN at ecobee.com → My Apps → Add Application.
+- **Nest:** needs a Google Device Access project and an OAuth web client whose redirect URI is the live app address above.
+- **Share:** "Copy share link" sends the setup (not your login) to someone else; they authorize with their own account.
+
+Keys and tokens are stored only in each person's browser. Nothing secret is in this repo.
+
+## Files
+
+`index.html` is the whole app. `manifest.webmanifest` and the PNG icons make it installable to a phone's Home Screen.
