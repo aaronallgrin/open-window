@@ -354,8 +354,10 @@ function evaluate(ind, out, p){
 /* ---------- network helpers ---------- */
 async function getJSON(url, opts={}){
   const res = await fetch(url, opts);
-  let body = null; try{ body = await res.json(); }catch{}
-  if (!res.ok){ const e = new Error((body && (body.detail || body.error_description || body.status?.message || body.error?.message || body.error)) || `HTTP ${res.status}`); e.status=res.status; e.body=body; throw e; }
+  const text = await res.text();
+  let body = null; try{ body = JSON.parse(text); }catch{}
+  if (!res.ok){ const msg = body && (body.detail || body.error_description || body.status?.message || body.error?.message || body.data?.error_message || (typeof body.error==="string" && body.error));
+    const e = new Error(msg || `HTTP ${res.status}${text && !body ? ": " + text.replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,120) : ""}`); e.status=res.status; e.body=body; throw e; }
   return body;
 }
 const NWS = { headers:{ "Accept":"application/geo+json" } };
@@ -518,35 +520,25 @@ async function beestatCall(resource, method, args){
 }
 async function beestatRead(){
   if (!prefs.beestatKey && !prefs.beestatRelay) throw Object.assign(new Error("Not connected"), {notConnected:true});
-  // Ask Beestat to pull fresh data from ecobee. This works even if the read below is blocked, and finishes in about a minute,
-  // so each reading reflects the previous cycle's sync at worst.
+  // Beestat's thermostat summary has current temperature and humidity.
+  let data;
+  try{ data = await beestatCall("thermostat", "read_id"); }
+  catch(e){
+    if (e instanceof TypeError) throw e;
+    await new Promise(r => setTimeout(r, 3000));          // one retry, in case Beestat was mid-sync
+    data = await beestatCall("thermostat", "read_id");
+  }
+  const row = firstRow(data);
+  const t = row?.temperature != null ? +row.temperature : null;
+  const rh = row?.humidity != null ? +row.humidity : null;
+  if (t == null) throw new Error("Beestat answered, but without a current temperature. Open beestat.io once so it syncs, then try again.");
+  const at = row.sync_end ? (Date.parse(row.sync_end.replace(" ","T")+"Z") || Date.now()) : Date.now();
+  // Then ask Beestat to pull fresh data from ecobee for the next reading. Sent after the read so the two never overlap.
   if (Date.now() - lastBeestatSync > 4*60e3){
     lastBeestatSync = Date.now();
     fetch(bsURL("thermostat", "sync"), {mode:"no-cors"}).catch(()=>{});
   }
-  let t=null, rh=null, co2=null, voc=null, aq=null, name="ecobee", at=Date.now();
-  // Preferred: Beestat's copy of ecobee's own record (same fields as the ecobee API).
-  try{
-    const row = firstRow(await beestatCall("ecobee_thermostat", "read_id"));
-    const rt = asObj(row?.runtime) || {};
-    if (rt.actualTemperature != null){
-      t = rt.actualTemperature/10; rh = rt.actualHumidity ?? null;
-      co2 = rt.actualCO2 > 0 ? rt.actualCO2 : null; voc = rt.actualVOC > 0 ? rt.actualVOC : null; aq = rt.actualAQScore > 0 ? rt.actualAQScore : null;
-      if (rt.lastStatusModified) at = Date.parse(rt.lastStatusModified.replace(" ","T")+"Z") || at;
-    }
-    name = row?.name || name;
-  }catch(e){ if (e instanceof TypeError) throw e; }
-  // Fallback: Beestat's own thermostat summary.
-  if (t == null){
-    const row = firstRow(await beestatCall("thermostat", "read_id"));
-    if (row){
-      t = row.temperature != null ? +row.temperature : null;
-      rh = row.humidity != null ? +row.humidity : null;
-      name = row.name || name;
-    }
-  }
-  if (t == null) throw new Error("Beestat answered, but without a current temperature. Open beestat.io once so it syncs, then try again.");
-  return { t, rh, dp:dewPointF(t, rh), co2, voc, aqScore:aq, name, src:"Beestat", at };
+  return { t, rh, dp:dewPointF(t, rh), co2:null, voc:null, name: row.name || "ecobee", src:"Beestat", at };
 }
 async function beestatTest(){
   setStatus("beestatStatus", "Checking…");
