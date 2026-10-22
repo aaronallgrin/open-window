@@ -4,6 +4,8 @@ A stoplight for whether to open the windows. It compares indoor readings from an
 
 **Live app:** https://aaronallgrin.github.io/open-window/
 
+**Redesign preview:** https://aaronallgrin.github.io/open-window/preview/ (same settings as the live app, since both share this browser's storage)
+
 ## How it decides
 
 - **Red:** rain or storms, outdoor AQI over 100, outdoor dew point 8°F+ above indoor (or muggy and higher), very windy, or temperatures far outside your comfort range.
@@ -37,4 +39,4 @@ Keys and tokens are stored only in each person's browser. Nothing secret is in t
 
 ## Files
 
-`index.html` is the whole app. `manifest.webmanifest` and the PNG icons make it installable to a phone's Home Screen.
+`index.html` is the whole app. `preview/` holds the redesign under review, with its own icons and manifest. `manifest.webmanifest` and the PNG icons make it installable to a phone's Home Screen.
