@@ -1392,7 +1392,6 @@ async function loadVersion(){
   const show = ts => { $("version").textContent = versionStamp(ts); };
   const cached = LS.get("version", null);
   if (cached) show(cached.ts);
-  if (cached && Date.now() - cached.checked < 10*60e3) return;
   try{
     const j = await getJSON("https://api.github.com/repos/aaronallgrin/open-window/commits?sha=main&per_page=1", {headers:{Accept:"application/vnd.github+json"}});
     const ts = Date.parse(j?.[0]?.commit?.committer?.date);
