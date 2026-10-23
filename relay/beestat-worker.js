@@ -14,7 +14,7 @@ const ALLOWED = {
   thermostat: ["read_id", "sync"],
 };
 // Fields the app reads from each thermostat row. Everything else Beestat returns stays here.
-const ROW_FIELDS = ["thermostat_id", "name", "temperature", "humidity", "sync_end"];
+const ROW_FIELDS = ["thermostat_id", "name", "temperature", "humidity", "setpoint_heat", "setpoint_cool"];
 
 export default {
   async fetch(req, env) {

@@ -436,11 +436,13 @@ input,select{font:400 16px var(--font-body);background:var(--color-bg);color:var
 
       <section class="sec">
         <h4>Comfort range</h4>
+        <label style="display:flex;align-items:center;gap:10px;font-size:15px;cursor:pointer"><input id="cMatch" type="checkbox" style="width:20px;height:20px;margin:0;accent-color:var(--color-accent)"> Match my thermostat's setpoints</label>
+        <p class="help" id="cMatchHelp" hidden></p>
         <div class="two">
           <label class="f"><span>Low <span class="uT">°F</span></span><input id="cLow" type="number" inputmode="numeric"></label>
           <label class="f"><span>High <span class="uT">°F</span></span><input id="cHigh" type="number" inputmode="numeric"></label>
         </div>
-        <p class="help">Outdoor air that pulls your house out of this range counts against opening.</p>
+        <p class="help">Outdoor air that pulls your house out of this range counts against opening. With matching on, these are used whenever the thermostat doesn't report both a heat and a cool setpoint.</p>
       </section>
 
       <section class="sec">
@@ -533,7 +535,7 @@ const LS = {
 const $ = id => document.getElementById(id);
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
 
-const prefs = Object.assign({ low:68, high:76, provider:"none", units:"us", ecobeeKey:"", beestatKey:"", beestatRelay:"", nestProject:"", nestClient:"", nestSecret:"" }, LS.get("prefs", {}));
+const prefs = Object.assign({ low:68, high:76, matchThermo:false, provider:"none", units:"us", ecobeeKey:"", beestatKey:"", beestatRelay:"", nestProject:"", nestClient:"", nestSecret:"" }, LS.get("prefs", {}));
 const savePrefs = () => LS.set("prefs", prefs);
 
 /* ---------- timing ---------- */
@@ -570,7 +572,13 @@ const fmtHourShort = t => new Date(t).toLocaleTimeString([], {hour:"numeric"}).r
 /* ---------- decision logic ---------- */
 // level: 0 green, 1 yellow, 2 red. Each reason carries its own level and a kind (for its icon); the worst level wins.
 const WET = /(rain|drizzle|shower|thunder|storm|snow|sleet|ice|hail)/i;
+// With matching on, the comfort range is the thermostat's live heat..cool setpoints (they follow its schedule).
+function comfort(ind, p){
+  const h = ind?.heatSp, c = ind?.coolSp;
+  return p.matchThermo && h!=null && c!=null && c-h>=2 ? Object.assign({}, p, {low:h, high:c}) : p;
+}
 function evaluate(ind, out, p){
+  p = comfort(ind, p);
   const R = [];
   const add = (lvl, kind, text) => R.push({lvl, kind, text});
   if (!out || out.t==null){ return {level:null, reasons:[]}; }
@@ -810,6 +818,7 @@ async function ecobeeRead(){
   const rh = rt.actualHumidity ?? null;
   const pos = v => (v!=null && v>0) ? v : null;
   return { t, rh, dp:dewPointF(t, rh), co2:pos(rt.actualCO2), voc:pos(rt.actualVOC), aqScore:pos(rt.actualAQScore),
+           heatSp: rt.desiredHeat!=null ? rt.desiredHeat/10 : null, coolSp: rt.desiredCool!=null ? rt.desiredCool/10 : null,
            name: th.name, src:"ecobee", at: rt.lastStatusModified ? Date.parse(rt.lastStatusModified.replace(" ","T")+"Z") : Date.now() };
 }
 
@@ -854,7 +863,8 @@ async function beestatRead(){
     lastBeestatSync = Date.now();
     fetch(bsURL("thermostat", "sync"), {mode:"no-cors"}).catch(()=>{});
   }
-  return { t, rh, dp:dewPointF(t, rh), co2:null, voc:null, name: row.name || "ecobee", src:"Beestat", at };
+  const sp = v => v!=null ? +v : null;
+  return { t, rh, dp:dewPointF(t, rh), co2:null, voc:null, heatSp:sp(row.setpoint_heat), coolSp:sp(row.setpoint_cool), name: row.name || "ecobee", src:"Beestat", at };
 }
 async function beestatTest(){
   setStatus("beestatStatus", "Checking…");
@@ -911,7 +921,8 @@ async function nestRead(){
   const tc = d.traits["sdm.devices.traits.Temperature"].ambientTemperatureCelsius;
   const rh = d.traits["sdm.devices.traits.Humidity"]?.ambientHumidityPercent ?? null;
   const t = tc!=null ? c2f(tc) : null;
-  return { t, rh, dp:dewPointF(t, rh), co2:null, voc:null, name: d.traits["sdm.devices.traits.Info"]?.customName || "Nest", src:"Nest", at:Date.now() };
+  const sp = d.traits["sdm.devices.traits.ThermostatTemperatureSetpoint"] || {};
+  return { t, rh, dp:dewPointF(t, rh), co2:null, voc:null, heatSp: sp.heatCelsius!=null ? c2f(sp.heatCelsius) : null, coolSp: sp.coolCelsius!=null ? c2f(sp.coolCelsius) : null, name: d.traits["sdm.devices.traits.Info"]?.customName || "Nest", src:"Nest", at:Date.now() };
 }
 
 function corsHint(e, who){
@@ -966,7 +977,7 @@ function loadDemo(){
   S.demo = true;
   S.lastOutdoor = S.lastForecast = S.lastAQ = S.lastIndoor = 0;
   const now = Date.now(), h0 = Math.floor(now/3600e3)*3600e3;
-  S.indoor = { t:74.5, rh:52, dp:dewPointF(74.5,52), co2:1120, voc:410, name:"Sample thermostat", src:"sample", at:now };
+  S.indoor = { t:74.5, rh:52, dp:dewPointF(74.5,52), co2:1120, voc:410, heatSp:66, coolSp:72, name:"Sample thermostat", src:"sample", at:now };
   S.outdoor = { t:63, rh:58, dp:dewPointF(63,58), wind:7, wx:"Mostly Clear", at:now, pop:5 };
   S.aq = { aqi:38, pm25:7.1, o3:52 };
   const temps=[63,62,61,60,59,58,58,59,63,67,71,74], dps=[48,48,49,49,50,50,51,53,56,59,63,66];
@@ -1335,6 +1346,10 @@ function syncUnitsUI(){
   const lo = $("cLow"), hi = $("cHigh");
   if (metric()){ lo.min=13; lo.max=27; hi.min=16; hi.max=29; } else { lo.min=55; lo.max=80; hi.min=60; hi.max=85; }
   lo.value = Math.round(tNum(prefs.low)); hi.value = Math.round(tNum(prefs.high));
+  $("cMatch").checked = !!prefs.matchThermo;
+  const live = comfort(S.indoor, {matchThermo:true}), help = $("cMatchHelp");
+  help.hidden = false;
+  help.textContent = live.low!=null ? `Your thermostat is set to ${T(live.low)}–${T(live.high)} right now.` : "Your thermostat isn't reporting both a heat and a cool setpoint right now.";
 }
 function openSettings(){
   syncUnitsUI();
@@ -1351,6 +1366,7 @@ function readSettings(){
   const toF = v => metric() ? c2f(v) : v;
   const lo = +$("cLow").value, hi = +$("cHigh").value;
   if (lo && hi && lo < hi){ prefs.low=Math.round(toF(lo)*2)/2; prefs.high=Math.round(toF(hi)*2)/2; }
+  prefs.matchThermo = $("cMatch").checked;
   prefs.provider = providerInputs().find(r => r.checked)?.value || prefs.provider;
   prefs.ecobeeKey=$("ecobeeKey").value.trim(); prefs.beestatKey=$("beestatKey").value.trim(); prefs.beestatRelay=$("beestatRelay").value.trim();
   prefs.nestProject=$("nestProject").value.trim(); prefs.nestClient=$("nestClient").value.trim(); prefs.nestSecret=$("nestSecret").value.trim();
