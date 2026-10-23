@@ -849,7 +849,7 @@ async function beestatRead(){
   const t = row?.temperature != null ? +row.temperature : null;
   const rh = row?.humidity != null ? +row.humidity : null;
   if (t == null) throw new Error("Beestat answered, but without a current temperature. Open beestat.io once so it syncs, then try again.");
-  const at = row.sync_end ? (Date.parse(row.sync_end.replace(" ","T")+"Z") || Date.now()) : Date.now();
+  const at = Date.now();   // Beestat's sync_end is its runtime-history sync point, not when this reading was taken
   if (Date.now() - lastBeestatSync > 4*60e3){
     lastBeestatSync = Date.now();
     fetch(bsURL("thermostat", "sync"), {mode:"no-cors"}).catch(()=>{});
