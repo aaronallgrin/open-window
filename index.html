@@ -542,6 +542,8 @@ const INDOOR_MS = 5*60e3, OUTDOOR_MS = 5*60e3, AQ_MS = 15*60e3, FORECAST_MS = 30
 /* ---------- state ---------- */
 const S = { loc:null, indoor:null, outdoor:null, aq:null, hourly:null, aqHourly:null, meta:null,
             lastIndoor:0, lastOutdoor:0, lastAQ:0, lastForecast:0, lastLocTry:0, errors:{}, demo:false, loaded:false };
+// The forecast period containing now, and those after it.
+const upcoming = () => (S.hourly||[]).filter(h => h.start > Date.now()-3600e3);
 
 /* ---------- math and units ---------- */
 const c2f = c => c*9/5+32;
@@ -941,10 +943,11 @@ async function tick(force){
       jobs.push(reader().then(live(i => { S.indoor=i; S.lastIndoor=Date.now(); delete S.errors.indoor; })).catch(e => S.errors.indoor = e));
     } else if (prefs.provider==="none" && !S.demo){ S.indoor=null; delete S.errors.indoor; }
     await Promise.all(jobs);
-    if (S.hourly && (!S.outdoor || Date.now()-S.outdoor.at > 3*3600e3)){
-      const h = S.hourly[0]; S.outdoor = { t:h.t, dp:h.dp ?? dewPointF(h.t,h.rh), rh:h.rh ?? rhFrom(h.t,h.dp), wind:h.wind, wx:h.wx, at:h.start, fromForecast:true };
+    const h0 = upcoming()[0];
+    if (h0 && (!S.outdoor || S.outdoor.fromForecast || Date.now()-S.outdoor.at > 3*3600e3)){
+      const h = h0; S.outdoor = { t:h.t, dp:h.dp ?? dewPointF(h.t,h.rh), rh:h.rh ?? rhFrom(h.t,h.dp), wind:h.wind, wx:h.wx, at:h.start, fromForecast:true };
     }
-    if (S.outdoor && S.hourly) S.outdoor.pop = S.hourly[0]?.pop;
+    if (S.outdoor && h0) S.outdoor.pop = h0.pop;
     if (!S.outdoor && !S.demo && S.errors.nws && CAN_DEMO) loadDemo();
   }catch(e){
     if (e.loc) S.errors.loc = e;
@@ -1008,10 +1011,11 @@ function setFavicon(level){
 }
 
 /* ---------- good-window span ---------- */
-function windowSpan(){
-  const hrs = (S.hourly||[]).filter(h => h.start >= Date.now()-30*60e3).slice(0,12);
+function windowSpan(nowLevel){
+  const hrs = upcoming().slice(0,12);
   if (!hrs.length) return null;
   const lv = hrs.map(h => evaluate(S.indoor, hourToOut(h), prefs).level);
+  if (nowLevel!=null) lv[0] = nowLevel;   // "now" follows the live observation, like the headline
   const fmt = t => new Date(t).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}).replace(":00","").replace(/\s?([AP])M/i,(m,a)=>" "+a.toLowerCase()+"m");
   if (lv[0]===0){
     const end = lv.findIndex(l => l!==0);
@@ -1038,14 +1042,14 @@ function render(){
   renderReadings(out);
   renderDew();
   renderGear();
-  renderTimeline();
+  renderTimeline(ev);
   renderFooter();
   setFavicon(ev.level);
 }
 
 function renderVerdict(ev){
   const hero = $("hero"), win = $("win"), h = $("verdictText");
-  const span = ev.level!=null ? windowSpan() : null;
+  const span = ev.level!=null ? windowSpan(ev.level) : null;
   const show = ev.reasons.filter(r => ev.level===0 || r.lvl>0 || ev.reasons.length<=2).slice(0,4);
   const list = show.length ? show : ev.reasons.slice(0,3);
   // Only touch the live region when the verdict actually changes, so screen readers aren't re-read every minute.
@@ -1172,7 +1176,7 @@ function renderDew(){
 /* ---------- jacket / umbrella ---------- */
 function gearAdvice(){
   const now = Date.now();
-  const hrs = (S.hourly||[]).filter(h => h.start >= now-30*60e3 && h.start < now+8*3600e3);
+  const hrs = upcoming().filter(h => h.start < now+8*3600e3);
   const O = S.outdoor;
   const out = [];
   const feels = (t, w) => t - (w>=15 ? 5 : w>=8 ? 2 : 0);
@@ -1214,10 +1218,10 @@ function renderGear(){
 
 /* ---------- 12-hour timeline ---------- */
 let tlHours = [];
-function renderTimeline(){
+function renderTimeline(nowEv){
   const svg = $("chartSvg"), vals = $("chartVals"), hoursEl = $("hours");
-  const hrs = (S.hourly||[]).filter(h => h.start >= Date.now()-30*60e3).slice(0,12);
-  tlHours = hrs.map(h => { const out = hourToOut(h); return {h, out, ev:evaluate(S.indoor, out, prefs)}; });
+  const hrs = upcoming().slice(0,12);
+  tlHours = hrs.map((h,i) => { const out = hourToOut(h); return {h, out, ev: i===0 && nowEv?.level!=null ? nowEv : evaluate(S.indoor, out, prefs)}; });
   if (!hrs.length){
     svg.innerHTML = ""; vals.innerHTML = ""; hoursEl.innerHTML = "";
     $("tlFoot").textContent = S.errors.fc ? "Hourly forecast unavailable right now." : "Loading forecast…";
